@@ -279,15 +279,22 @@ class FrameResult:
     """Per-frame analysis result.
 
     Attributes:
+        species: Species labels, length ``n_atoms``.
         adjacency: Sparse boolean adjacency matrix, shape
             ``(n_atoms, n_atoms)``.
         n_clusters: Number of connected components.
         labels: Cluster label per atom, shape ``(n_atoms,)``.
     """
 
+    species: list[str]
     adjacency: sparse.csr_matrix
     n_clusters: int
     labels: np.ndarray
+
+    @property
+    def composition(self) -> dict[str, int]:
+        """Cluster formula counts for this frame."""
+        return cluster_composition(self.species, self.labels)
 
 
 def analyse_trajectory(
@@ -314,6 +321,6 @@ def analyse_trajectory(
 
         adjacency = find_bonds(species, coords, bond_specs, lattice)
         n_clusters, labels = find_clusters(adjacency)
-        results.append(FrameResult(adjacency, n_clusters, labels))
+        results.append(FrameResult(species, adjacency, n_clusters, labels))
 
     return results

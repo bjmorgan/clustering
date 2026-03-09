@@ -303,3 +303,23 @@ class TestClusterComposition:
     def test_empty(self):
         result = cluster_composition([], np.array([], dtype=int))
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# FrameResult.composition
+# ---------------------------------------------------------------------------
+
+
+class TestFrameResultComposition:
+    """Test the composition property on FrameResult."""
+
+    def test_composition_property(self):
+        """composition returns the same result as cluster_composition."""
+        species = ["C", "O", "O", "H", "H", "O"]
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        adj = sparse.csr_matrix((6, 6), dtype=bool)
+
+        result = FrameResult(
+            species=species, adjacency=adj, n_clusters=2, labels=labels,
+        )
+        assert result.composition == {"CO2": 1, "H2O": 1}
