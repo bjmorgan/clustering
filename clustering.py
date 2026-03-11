@@ -271,6 +271,172 @@ def _find_bonds_numba(
     return adj.tocsr()
 
 
+def _make_numba_batch_kernel():
+    """Build the parallel batch kernel (prange over frames)."""
+
+    @numba.njit(parallel=True)
+    def _find_bonds_batch_kernel(
+        all_coords,    # (n_frames, n, 3) float64
+        all_lattices,  # (n_frames, 3, 3) float64
+        all_lat_invs,  # (n_frames, 3, 3) float64
+        spec_min_sq,   # (n_specs,) float64
+        spec_max_sq,   # (n_specs,) float64
+        match_a,       # (n_specs, n) bool
+        match_b,       # (n_specs, n) bool
+        row_bufs,      # (n_frames, max_bonds) int64 — output
+        col_bufs,      # (n_frames, max_bonds) int64 — output
+        counts,        # (n_frames,) int64 — output
+    ):
+        n_frames = all_coords.shape[0]
+        n = all_coords.shape[1]
+        n_specs = spec_min_sq.shape[0]
+
+        for f in numba.prange(n_frames):
+            coords = all_coords[f]
+            lattice = all_lattices[f]
+            lat_inv = all_lat_invs[f]
+            count = 0
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = coords[i, 0] - coords[j, 0]
+                    dy = coords[i, 1] - coords[j, 1]
+                    dz = coords[i, 2] - coords[j, 2]
+
+                    fx = dx * lat_inv[0, 0] + dy * lat_inv[1, 0] + dz * lat_inv[2, 0]
+                    fy = dx * lat_inv[0, 1] + dy * lat_inv[1, 1] + dz * lat_inv[2, 1]
+                    fz = dx * lat_inv[0, 2] + dy * lat_inv[1, 2] + dz * lat_inv[2, 2]
+
+                    fx -= round(fx)
+                    fy -= round(fy)
+                    fz -= round(fz)
+
+                    cx = fx * lattice[0, 0] + fy * lattice[1, 0] + fz * lattice[2, 0]
+                    cy = fx * lattice[0, 1] + fy * lattice[1, 1] + fz * lattice[2, 1]
+                    cz = fx * lattice[0, 2] + fy * lattice[1, 2] + fz * lattice[2, 2]
+
+                    dist_sq = cx * cx + cy * cy + cz * cz
+
+                    for s in range(n_specs):
+                        if dist_sq < spec_min_sq[s] or dist_sq > spec_max_sq[s]:
+                            continue
+                        if (match_a[s, i] and match_b[s, j]) or (
+                            match_a[s, j] and match_b[s, i]
+                        ):
+                            row_bufs[f, count] = i
+                            col_bufs[f, count] = j
+                            count += 1
+                            break
+
+            counts[f] = count
+
+    return _find_bonds_batch_kernel
+
+
+_numba_batch_kernel = None
+
+
+def _get_numba_batch_kernel():
+    global _numba_batch_kernel
+    if _numba_batch_kernel is None:
+        _numba_batch_kernel = _make_numba_batch_kernel()
+    return _numba_batch_kernel
+
+
+def find_bonds_batch(
+    species: list[str],
+    all_coords: np.ndarray,
+    bond_specs: list[BondSpec],
+    all_lattices: np.ndarray,
+    species_masks: tuple[np.ndarray, np.ndarray] | None = None,
+) -> list[sparse.csr_matrix]:
+    """Detect bonds across multiple frames in parallel using numba.
+
+    Processes all frames concurrently via ``numba.prange``.  The species
+    labels must be constant across frames; lattice and coordinates may
+    vary (NPT support).
+
+    Args:
+        species: Species labels, length ``n_atoms``.
+        all_coords: Coordinates, shape ``(n_frames, n_atoms, 3)``.
+        bond_specs: Bond detection rules, applied in order.
+        all_lattices: Lattice matrices, shape ``(n_frames, 3, 3)``.
+        species_masks: Pre-computed per-atom species masks from
+            :func:`_build_species_masks`.
+
+    Returns:
+        List of symmetric boolean sparse matrices, one per frame.
+
+    Raises:
+        ImportError: If numba is not installed.
+        ValueError: If MIC assumption is violated for any frame.
+    """
+    if not HAS_NUMBA:
+        raise ImportError("numba is required for find_bonds_batch")
+
+    all_coords = np.asarray(all_coords, dtype=float)
+    all_lattices = np.asarray(all_lattices, dtype=float)
+    n_frames = all_coords.shape[0]
+    n_atoms = len(species)
+
+    if n_atoms == 0 or len(bond_specs) == 0:
+        return [
+            sparse.csr_matrix((n_atoms, n_atoms), dtype=bool)
+            for _ in range(n_frames)
+        ]
+
+    # Validate MIC assumption for all frames.
+    max_bond = max(s.max_length for s in bond_specs)
+    for f in range(n_frames):
+        r_ins = _inscribed_sphere_radius(all_lattices[f])
+        if max_bond >= r_ins:
+            raise ValueError(
+                f"Frame {f}: max bond length ({max_bond:.3f}) >= inscribed "
+                f"sphere radius ({r_ins:.3f}).  The unit cell is too small "
+                f"for the MIC assumption."
+            )
+
+    kernel = _get_numba_batch_kernel()
+
+    all_lat_invs = np.linalg.inv(all_lattices)
+
+    spec_min_sq = np.array([s.min_length ** 2 for s in bond_specs])
+    spec_max_sq = np.array([s.max_length ** 2 for s in bond_specs])
+
+    if species_masks is None:
+        match_a, match_b = _build_species_masks(species, bond_specs)
+    else:
+        match_a, match_b = species_masks
+
+    max_bonds = n_atoms * (n_atoms - 1) // 2
+    row_bufs = np.empty((n_frames, max_bonds), dtype=np.int64)
+    col_bufs = np.empty((n_frames, max_bonds), dtype=np.int64)
+    counts = np.empty(n_frames, dtype=np.int64)
+
+    kernel(
+        all_coords, all_lattices, all_lat_invs,
+        spec_min_sq, spec_max_sq,
+        match_a, match_b,
+        row_bufs, col_bufs, counts,
+    )
+
+    # Build sparse matrices from COO buffers.
+    results: list[sparse.csr_matrix] = []
+    for f in range(n_frames):
+        c = counts[f]
+        row = row_bufs[f, :c]
+        col = col_bufs[f, :c]
+        data = np.ones(c, dtype=bool)
+        adj = sparse.coo_matrix(
+            (np.concatenate([data, data]),
+             (np.concatenate([row, col]), np.concatenate([col, row]))),
+            shape=(n_atoms, n_atoms),
+        )
+        results.append(adj.tocsr())
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Bond detection
 # ---------------------------------------------------------------------------

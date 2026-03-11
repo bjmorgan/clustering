@@ -11,6 +11,7 @@ from clustering import (
     build_pair_masks,
     cluster_composition,
     find_bonds,
+    find_bonds_batch,
     find_clusters,
 )
 from collections import Counter
@@ -411,3 +412,56 @@ class TestFindBondsNumba:
         adj_nb = find_bonds(species, coords, specs, lattice, backend="numba")
 
         assert (adj_np != adj_nb).nnz == 0
+
+
+# ---------------------------------------------------------------------------
+# Batch (parallel) bond detection
+# ---------------------------------------------------------------------------
+
+
+class TestFindBondsBatch:
+    """Verify batch processing matches sequential frame-by-frame results."""
+
+    def test_batch_matches_sequential(self):
+        """Multiple frames with varying coords give identical results."""
+        rng = np.random.default_rng(99)
+        n = 30
+        n_frames = 5
+        species = rng.choice(["C", "O", "H"], size=n).tolist()
+        lattice = _cubic_lattice(10.0)
+        specs = [
+            BondSpec(species=("C", "O"), max_length=1.6),
+            BondSpec(species=("O", "H"), max_length=1.2),
+            BondSpec(species=("*", "*"), max_length=1.8),
+        ]
+
+        all_coords = rng.uniform(0, 8, size=(n_frames, n, 3))
+        all_lattices = np.broadcast_to(lattice, (n_frames, 3, 3)).copy()
+
+        # Sequential reference.
+        sequential = [
+            find_bonds(species, all_coords[f], specs, all_lattices[f],
+                       backend="numba")
+            for f in range(n_frames)
+        ]
+
+        # Batch.
+        batch = find_bonds_batch(species, all_coords, specs, all_lattices)
+
+        for f in range(n_frames):
+            assert (sequential[f] != batch[f]).nnz == 0
+
+    def test_variable_lattice(self):
+        """Different lattice per frame (NPT-like)."""
+        species = ["C", "O"]
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        coords_f0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        coords_f1 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+        all_coords = np.stack([coords_f0, coords_f1])
+        all_lattices = np.stack([_cubic_lattice(20.0), _cubic_lattice(15.0)])
+
+        batch = find_bonds_batch(species, all_coords, specs, all_lattices)
+
+        assert batch[0][0, 1]
+        assert batch[1][0, 1]

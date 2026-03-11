@@ -8,7 +8,7 @@ from pymatgen.io.ase import AseAtomsAdaptor
 
 from clustering import (
     BondSpec, _build_species_masks, build_pair_masks,
-    find_bonds, find_clusters, cluster_composition,
+    find_bonds, find_bonds_batch, find_clusters, cluster_composition,
 )
 
 
@@ -110,6 +110,44 @@ def main() -> None:
         assert nc_np == nc_nb, f"Frame {i}: n_clusters differ ({nc_np} vs {nc_nb})"
         assert np.array_equal(lab_np, lab_nb), f"Frame {i}: labels differ"
         assert (adj_np != adj_nb).nnz == 0, f"Frame {i}: adjacency matrices differ"
+    print("  All frames identical.")
+
+    # --- Numba batch (parallel over frames) ---
+    print("\nNumba batch (warming up parallel kernel)...")
+    all_coords = np.array([s.cart_coords for s in structures])
+    all_lattices = np.array([s.lattice.matrix for s in structures])
+    # Warmup.
+    find_bonds_batch(species, all_coords[:1], bond_specs, all_lattices[:1],
+                     species_masks=species_masks)
+    print("  JIT compiled.")
+
+    print("\nNumba batch (parallel over frames):")
+    t0 = time.perf_counter()
+    batch_adjs = find_bonds_batch(
+        species, all_coords, bond_specs, all_lattices,
+        species_masks=species_masks,
+    )
+    t1 = time.perf_counter()
+    t_batch_bonds = t1 - t0
+
+    t0 = time.perf_counter()
+    results_batch: list[tuple] = []
+    for adj in batch_adjs:
+        n_clusters, labels = find_clusters(adj)
+        results_batch.append((adj, n_clusters, labels))
+    t1 = time.perf_counter()
+    t_batch_total = t_batch_bonds + (t1 - t0)
+    print(f"  bonds: {t_batch_bonds:.3f}s ({t_batch_bonds / n_frames * 1000:.1f} ms/frame)")
+    print(f"  total: {t_batch_total:.3f}s ({t_batch_total / n_frames * 1000:.1f} ms/frame)")
+
+    # Verify batch matches sequential.
+    print("\nVerifying batch matches sequential...")
+    for i in range(n_frames):
+        adj_seq, nc_seq, lab_seq = results_numba[i]
+        adj_bat, nc_bat, lab_bat = results_batch[i]
+        assert nc_seq == nc_bat, f"Frame {i}: n_clusters differ"
+        assert np.array_equal(lab_seq, lab_bat), f"Frame {i}: labels differ"
+        assert (adj_seq != adj_bat).nnz == 0, f"Frame {i}: adjacency differ"
     print("  All frames identical.")
 
     # --- Show sample composition ---
