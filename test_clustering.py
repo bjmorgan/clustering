@@ -8,6 +8,7 @@ from clustering import (
     BondSpec,
     FrameResult,
     _hill_formula,
+    build_pair_masks,
     cluster_composition,
     find_bonds,
     find_clusters,
@@ -144,6 +145,17 @@ class TestFindBondsSimple:
         adj = find_bonds(["C"], np.array([[0.0, 0.0, 0.0]]), [], _cubic_lattice(20.0))
         assert adj.shape == (1, 1)
         assert adj.nnz == 0
+
+    def test_precomputed_pair_masks(self):
+        """Pre-computed pair masks give the same result as computing inline."""
+        species = ["C", "O"]
+        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        lattice = _cubic_lattice(20.0)
+
+        masks = build_pair_masks(species, specs)
+        adj = find_bonds(species, coords, specs, lattice, pair_masks=masks)
+        assert adj[0, 1]
 
 
 # ---------------------------------------------------------------------------

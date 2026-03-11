@@ -94,6 +94,30 @@ def _species_pair_mask(
     )
 
 
+def build_pair_masks(
+    species: list[str],
+    bond_specs: list[BondSpec],
+) -> list[np.ndarray]:
+    """Pre-compute species pair masks for reuse across frames.
+
+    For a trajectory where species labels are constant, calling this
+    once and passing the result to :func:`find_bonds` avoids redundant
+    mask computation on every frame.
+
+    Args:
+        species: Species labels, length ``n_atoms``.
+        bond_specs: Bond detection rules.
+
+    Returns:
+        List of boolean arrays, one per spec, each shape ``(n_atoms, n_atoms)``.
+    """
+    unique_species = list(set(species))
+    return [
+        _species_pair_mask(spec, species, unique_species)
+        for spec in bond_specs
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Bond detection
 # ---------------------------------------------------------------------------
@@ -104,6 +128,7 @@ def find_bonds(
     coords: np.ndarray,
     bond_specs: list[BondSpec],
     lattice: np.ndarray,
+    pair_masks: list[np.ndarray] | None = None,
 ) -> sparse.csr_matrix:
     """Detect bonded atom pairs under the minimum image convention.
 
@@ -117,6 +142,9 @@ def find_bonds(
         coords: Cartesian coordinates, shape ``(n_atoms, 3)``.
         bond_specs: Bond detection rules, applied in order.
         lattice: 3x3 matrix of lattice vectors (row vectors).
+        pair_masks: Pre-computed species pair masks from
+            :func:`build_pair_masks`.  When provided, species mask
+            computation is skipped.  Must have one entry per spec.
 
     Returns:
         Symmetric boolean sparse matrix, shape ``(n_atoms, n_atoms)``.
@@ -156,13 +184,18 @@ def find_bonds(
     # Only consider upper triangle (avoid double-counting and self-bonds).
     upper = np.triu(np.ones((n_atoms, n_atoms), dtype=bool), k=1)
     claimed = np.zeros((n_atoms, n_atoms), dtype=bool)
-    unique_species = list(set(species))
+
+    if pair_masks is None:
+        unique_species = list(set(species))
+        pair_masks = [
+            _species_pair_mask(spec, species, unique_species)
+            for spec in bond_specs
+        ]
 
     # Accumulate hits across all specs (first-match-wins).
     bonded = np.zeros((n_atoms, n_atoms), dtype=bool)
 
-    for spec in bond_specs:
-        pair_mask = _species_pair_mask(spec, species, unique_species)
+    for spec, pair_mask in zip(bond_specs, pair_masks):
         dist_ok = (dist >= spec.min_length) & (dist <= spec.max_length)
         hits = upper & pair_mask & dist_ok & ~claimed
         claimed |= hits
@@ -314,12 +347,17 @@ def analyse_trajectory(
     """
     results: list[FrameResult] = []
 
+    # Pre-compute species pair masks once (species are constant across frames).
+    species = [str(site.specie) for site in structures[0]]
+    pair_masks = build_pair_masks(species, bond_specs)
+
     for structure in structures:
-        species = [str(site.specie) for site in structure]
         coords = structure.cart_coords
         lattice = structure.lattice.matrix
 
-        adjacency = find_bonds(species, coords, bond_specs, lattice)
+        adjacency = find_bonds(
+            species, coords, bond_specs, lattice, pair_masks=pair_masks,
+        )
         n_clusters, labels = find_clusters(adjacency)
         results.append(FrameResult(species, adjacency, n_clusters, labels))
 
