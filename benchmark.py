@@ -8,7 +8,8 @@ from pymatgen.io.ase import AseAtomsAdaptor
 
 from clustering import (
     BondSpec, _build_species_masks, build_pair_masks,
-    find_bonds, find_bonds_batch, find_clusters, cluster_composition,
+    find_bonds, find_bonds_batch, find_clusters, find_clusters_batch,
+    cluster_composition,
 )
 
 
@@ -148,6 +149,30 @@ def main() -> None:
         assert nc_seq == nc_bat, f"Frame {i}: n_clusters differ"
         assert np.array_equal(lab_seq, lab_bat), f"Frame {i}: labels differ"
         assert (adj_seq != adj_bat).nnz == 0, f"Frame {i}: adjacency differ"
+    print("  All frames identical.")
+
+    # --- Numba batch with union-find (bonds + clustering in one pass) ---
+    print("\nNumba batch + union-find (warming up kernel)...")
+    find_clusters_batch(species, all_coords[:1], bond_specs, all_lattices[:1],
+                        species_masks=species_masks)
+    print("  JIT compiled.")
+
+    print("\nNumba batch + union-find (parallel bonds + clustering):")
+    t0 = time.perf_counter()
+    uf_n_clusters, uf_labels = find_clusters_batch(
+        species, all_coords, bond_specs, all_lattices,
+        species_masks=species_masks,
+    )
+    t1 = time.perf_counter()
+    t_uf = t1 - t0
+    print(f"  {t_uf:.3f}s ({t_uf / n_frames * 1000:.1f} ms/frame)")
+
+    # Verify union-find matches batch.
+    print("\nVerifying union-find matches batch...")
+    for i in range(n_frames):
+        _, nc_bat, lab_bat = results_batch[i]
+        assert uf_n_clusters[i] == nc_bat, f"Frame {i}: n_clusters differ"
+        assert np.array_equal(uf_labels[i], lab_bat), f"Frame {i}: labels differ"
     print("  All frames identical.")
 
     # --- Show sample composition ---

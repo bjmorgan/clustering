@@ -13,6 +13,7 @@ from clustering import (
     find_bonds,
     find_bonds_batch,
     find_clusters,
+    find_clusters_batch,
 )
 from collections import Counter
 
@@ -465,3 +466,77 @@ class TestFindBondsBatch:
 
         assert batch[0][0, 1]
         assert batch[1][0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Batch (parallel) bond detection + clustering
+# ---------------------------------------------------------------------------
+
+
+class TestFindClustersBatch:
+    """Verify combined bond+cluster batch matches sequential results."""
+
+    def test_matches_sequential(self):
+        """Labels from batch union-find match find_bonds + find_clusters."""
+        rng = np.random.default_rng(99)
+        n = 30
+        n_frames = 5
+        species = rng.choice(["C", "O", "H"], size=n).tolist()
+        lattice = _cubic_lattice(10.0)
+        specs = [
+            BondSpec(species=("C", "O"), max_length=1.6),
+            BondSpec(species=("O", "H"), max_length=1.2),
+            BondSpec(species=("*", "*"), max_length=1.8),
+        ]
+
+        all_coords = rng.uniform(0, 8, size=(n_frames, n, 3))
+        all_lattices = np.broadcast_to(lattice, (n_frames, 3, 3)).copy()
+
+        # Reference: sequential find_bonds + find_clusters.
+        ref_labels = []
+        ref_n_clusters = []
+        for f in range(n_frames):
+            adj = find_bonds(species, all_coords[f], specs, all_lattices[f],
+                             backend="numba")
+            nc, lab = find_clusters(adj)
+            ref_labels.append(lab)
+            ref_n_clusters.append(nc)
+
+        # Batch.
+        batch_n_clusters, batch_labels = find_clusters_batch(
+            species, all_coords, specs, all_lattices,
+        )
+
+        for f in range(n_frames):
+            assert batch_n_clusters[f] == ref_n_clusters[f], (
+                f"Frame {f}: n_clusters differ "
+                f"({batch_n_clusters[f]} vs {ref_n_clusters[f]})"
+            )
+            assert np.array_equal(batch_labels[f], ref_labels[f]), (
+                f"Frame {f}: labels differ"
+            )
+
+    def test_all_isolated(self):
+        """No bonds at all — each atom is its own cluster."""
+        species = ["C", "O", "H"]
+        # Atoms far apart in a big cell.
+        coords = np.array([[[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [9.0, 9.0, 9.0]]])
+        lattice = np.array([_cubic_lattice(20.0)])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+
+        n_clusters, labels = find_clusters_batch(species, coords, specs, lattice)
+
+        assert n_clusters[0] == 3
+        assert len(set(labels[0])) == 3
+
+    def test_single_cluster(self):
+        """All atoms bonded into one cluster."""
+        species = ["C", "O"]
+        coords = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]])
+        lattice = np.array([_cubic_lattice(20.0)])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+
+        n_clusters, labels = find_clusters_batch(species, coords, specs, lattice)
+
+        assert n_clusters[0] == 1
+        assert labels[0, 0] == labels[0, 1] == 0
