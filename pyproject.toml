@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-clusters"
+version = "0.1.0"
+description = "Atomic cluster analysis for MD trajectories"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+numba = ["numba"]
+ase = ["ase"]
+pymatgen = ["pymatgen"]
+dev = [
+    "pytest",
+    "numba",
+]
+
+[tool.setuptools.packages.find]
+include = ["md_clusters*"]

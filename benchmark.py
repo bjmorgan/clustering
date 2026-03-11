@@ -6,7 +6,7 @@ import numpy as np
 from ase.io import read
 from pymatgen.io.ase import AseAtomsAdaptor
 
-from clustering import (
+from md_clusters import (
     BondSpec, analyse_trajectory, analyse_structures, analyse_atoms,
     find_bonds, find_clusters, cluster_composition,
 )

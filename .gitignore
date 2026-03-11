@@ -4,3 +4,4 @@ __pycache__/
 *.md
 !README.md
 *.extxyz
+md_clusters.egg-info/
