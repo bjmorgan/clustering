@@ -19,6 +19,7 @@ pymatgen = ["pymatgen"]
 dev = [
     "pytest",
     "mypy",
+    "scipy-stubs",
     "numba",
 ]
 
@@ -28,3 +29,7 @@ include = ["md_clusters*"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[[tool.mypy.overrides]]
+module = "numba"
+ignore_missing_imports = true

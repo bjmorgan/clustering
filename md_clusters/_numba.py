@@ -15,7 +15,7 @@ from md_clusters.bonds import _inscribed_sphere_radius
 from md_clusters.types import BondSpec
 
 try:
-    import numba  # type: ignore[import-untyped]
+    import numba
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
