@@ -15,6 +15,8 @@ from clustering import (
 )
 from collections import Counter
 
+numba = pytest.importorskip("numba")
+
 
 # ---------------------------------------------------------------------------
 # BondSpec
@@ -335,3 +337,77 @@ class TestFrameResultComposition:
             species=species, adjacency=adj, n_clusters=2, labels=labels,
         )
         assert result.composition == {"CO2": 1, "H2O": 1}
+
+
+# ---------------------------------------------------------------------------
+# Numba backend
+# ---------------------------------------------------------------------------
+
+
+class TestFindBondsNumba:
+    """Verify the numba backend matches numpy for all bond detection cases."""
+
+    def test_two_bonded_atoms(self):
+        species = ["C", "O"]
+        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        lattice = _cubic_lattice(20.0)
+
+        adj = find_bonds(species, coords, specs, lattice, backend="numba")
+        assert adj[0, 1]
+        assert adj[1, 0]
+        assert not adj[0, 0]
+
+    def test_two_atoms_too_far(self):
+        species = ["C", "O"]
+        coords = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        lattice = _cubic_lattice(20.0)
+
+        adj = find_bonds(species, coords, specs, lattice, backend="numba")
+        assert adj.nnz == 0
+
+    def test_species_mismatch(self):
+        species = ["C", "C"]
+        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        lattice = _cubic_lattice(20.0)
+
+        adj = find_bonds(species, coords, specs, lattice, backend="numba")
+        assert adj.nnz == 0
+
+    def test_wildcard_species(self):
+        species = ["Zr", "O"]
+        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        specs = [BondSpec(species=("*", "*"), max_length=1.5)]
+        lattice = _cubic_lattice(20.0)
+
+        adj = find_bonds(species, coords, specs, lattice, backend="numba")
+        assert adj[0, 1]
+
+    def test_bonded_across_boundary(self):
+        species = ["C", "O"]
+        coords = np.array([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]])
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        lattice = _cubic_lattice(10.0)
+
+        adj = find_bonds(species, coords, specs, lattice, backend="numba")
+        assert adj[0, 1]
+
+    def test_matches_numpy_on_larger_system(self):
+        """Random 20-atom system: numba and numpy give identical results."""
+        rng = np.random.default_rng(42)
+        n = 20
+        species = rng.choice(["C", "O", "H", "N"], size=n).tolist()
+        coords = rng.uniform(0, 8, size=(n, 3))
+        lattice = _cubic_lattice(10.0)
+        specs = [
+            BondSpec(species=("C", "O"), max_length=1.6),
+            BondSpec(species=("O", "H"), max_length=1.2),
+            BondSpec(species=("*", "*"), max_length=1.8),
+        ]
+
+        adj_np = find_bonds(species, coords, specs, lattice, backend="numpy")
+        adj_nb = find_bonds(species, coords, specs, lattice, backend="numba")
+
+        assert (adj_np != adj_nb).nnz == 0

@@ -15,6 +15,12 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
+try:
+    import numba
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
 
 @dataclass(frozen=True)
 class BondSpec:
@@ -119,6 +125,153 @@ def build_pair_masks(
 
 
 # ---------------------------------------------------------------------------
+# Numba-accelerated bond detection
+# ---------------------------------------------------------------------------
+
+
+def _make_numba_kernel():
+    """Build the numba-jitted kernel (deferred to avoid import-time cost)."""
+
+    @numba.njit
+    def _find_bonds_numba_kernel(
+        coords,       # (n, 3) float64
+        lattice,      # (3, 3) float64
+        lat_inv,      # (3, 3) float64
+        spec_min_sq,  # (n_specs,) float64
+        spec_max_sq,  # (n_specs,) float64
+        match_a,      # (n_specs, n) bool
+        match_b,      # (n_specs, n) bool
+        row_buf,      # (max_bonds,) int64 — output
+        col_buf,      # (max_bonds,) int64 — output
+    ):
+        n = coords.shape[0]
+        n_specs = spec_min_sq.shape[0]
+        count = 0
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                # Cartesian difference.
+                dx = coords[i, 0] - coords[j, 0]
+                dy = coords[i, 1] - coords[j, 1]
+                dz = coords[i, 2] - coords[j, 2]
+
+                # To fractional coordinates: diff @ lat_inv.
+                fx = dx * lat_inv[0, 0] + dy * lat_inv[1, 0] + dz * lat_inv[2, 0]
+                fy = dx * lat_inv[0, 1] + dy * lat_inv[1, 1] + dz * lat_inv[2, 1]
+                fz = dx * lat_inv[0, 2] + dy * lat_inv[1, 2] + dz * lat_inv[2, 2]
+
+                # Minimum image convention.
+                fx -= round(fx)
+                fy -= round(fy)
+                fz -= round(fz)
+
+                # Back to Cartesian: frac @ lattice.
+                cx = fx * lattice[0, 0] + fy * lattice[1, 0] + fz * lattice[2, 0]
+                cy = fx * lattice[0, 1] + fy * lattice[1, 1] + fz * lattice[2, 1]
+                cz = fx * lattice[0, 2] + fy * lattice[1, 2] + fz * lattice[2, 2]
+
+                dist_sq = cx * cx + cy * cy + cz * cz
+
+                # First-match-wins over specs.
+                for s in range(n_specs):
+                    if dist_sq < spec_min_sq[s] or dist_sq > spec_max_sq[s]:
+                        continue
+                    if (match_a[s, i] and match_b[s, j]) or (
+                        match_a[s, j] and match_b[s, i]
+                    ):
+                        row_buf[count] = i
+                        col_buf[count] = j
+                        count += 1
+                        break
+
+        return count
+
+    return _find_bonds_numba_kernel
+
+
+# Lazy singleton for the compiled kernel.
+_numba_kernel = None
+
+
+def _get_numba_kernel():
+    global _numba_kernel
+    if _numba_kernel is None:
+        _numba_kernel = _make_numba_kernel()
+    return _numba_kernel
+
+
+def _build_species_masks(
+    species: list[str],
+    bond_specs: list[BondSpec],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build per-atom species masks for the numba kernel.
+
+    Returns:
+        ``(match_a, match_b)`` each of shape ``(n_specs, n_atoms)``.
+    """
+    unique_species = list(set(species))
+    n_atoms = len(species)
+    n_specs = len(bond_specs)
+    match_a = np.zeros((n_specs, n_atoms), dtype=np.bool_)
+    match_b = np.zeros((n_specs, n_atoms), dtype=np.bool_)
+
+    for s, spec in enumerate(bond_specs):
+        sp_a, sp_b = spec.species
+        set_a = {sp for sp in unique_species if fnmatch(sp, sp_a)}
+        set_b = {sp for sp in unique_species if fnmatch(sp, sp_b)}
+        for i, sp in enumerate(species):
+            match_a[s, i] = sp in set_a
+            match_b[s, i] = sp in set_b
+
+    return match_a, match_b
+
+
+def _find_bonds_numba(
+    species: list[str],
+    coords: np.ndarray,
+    bond_specs: list[BondSpec],
+    lattice: np.ndarray,
+    species_masks: tuple[np.ndarray, np.ndarray] | None = None,
+) -> sparse.csr_matrix:
+    """Numba-accelerated bond detection."""
+    n_atoms = len(species)
+    kernel = _get_numba_kernel()
+
+    lat_inv = np.linalg.inv(lattice)
+
+    spec_min_sq = np.array([s.min_length ** 2 for s in bond_specs])
+    spec_max_sq = np.array([s.max_length ** 2 for s in bond_specs])
+
+    if species_masks is not None:
+        match_a, match_b = species_masks
+    else:
+        match_a, match_b = _build_species_masks(species, bond_specs)
+
+    max_bonds = n_atoms * (n_atoms - 1) // 2
+    row_buf = np.empty(max_bonds, dtype=np.int64)
+    col_buf = np.empty(max_bonds, dtype=np.int64)
+
+    count = kernel(
+        coords, lattice, lat_inv,
+        spec_min_sq, spec_max_sq,
+        match_a, match_b,
+        row_buf, col_buf,
+    )
+
+    row = row_buf[:count]
+    col = col_buf[:count]
+    data = np.ones(count, dtype=bool)
+
+    # Build symmetric sparse matrix from upper-triangle hits.
+    adj = sparse.coo_matrix(
+        (np.concatenate([data, data]),
+         (np.concatenate([row, col]), np.concatenate([col, row]))),
+        shape=(n_atoms, n_atoms),
+    )
+    return adj.tocsr()
+
+
+# ---------------------------------------------------------------------------
 # Bond detection
 # ---------------------------------------------------------------------------
 
@@ -129,6 +282,8 @@ def find_bonds(
     bond_specs: list[BondSpec],
     lattice: np.ndarray,
     pair_masks: list[np.ndarray] | None = None,
+    backend: str = "numpy",
+    species_masks: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> sparse.csr_matrix:
     """Detect bonded atom pairs under the minimum image convention.
 
@@ -145,6 +300,11 @@ def find_bonds(
         pair_masks: Pre-computed species pair masks from
             :func:`build_pair_masks`.  When provided, species mask
             computation is skipped.  Must have one entry per spec.
+            Only used by the ``"numpy"`` backend.
+        backend: ``"numpy"`` (default) or ``"numba"``.
+        species_masks: Pre-computed per-atom species masks from
+            :func:`_build_species_masks`.  Only used by the ``"numba"``
+            backend.
 
     Returns:
         Symmetric boolean sparse matrix, shape ``(n_atoms, n_atoms)``.
@@ -168,6 +328,14 @@ def find_bonds(
             f"Max bond length ({max_bond:.3f}) >= inscribed sphere "
             f"radius ({r_ins:.3f}).  The unit cell is too small for "
             f"the MIC assumption."
+        )
+
+    if backend == "numba":
+        if not HAS_NUMBA:
+            raise ImportError("numba is required for backend='numba'")
+        return _find_bonds_numba(
+            species, coords, bond_specs, lattice,
+            species_masks=species_masks,
         )
 
     # Pairwise differences in Cartesian, then fractional.

@@ -6,7 +6,10 @@ import numpy as np
 from ase.io import read
 from pymatgen.io.ase import AseAtomsAdaptor
 
-from clustering import BondSpec, build_pair_masks, find_bonds, find_clusters, cluster_composition
+from clustering import (
+    BondSpec, _build_species_masks, build_pair_masks,
+    find_bonds, find_clusters, cluster_composition,
+)
 
 
 def main() -> None:
@@ -70,6 +73,43 @@ def main() -> None:
         assert nc_a == nc_b, f"Frame {i}: n_clusters differ ({nc_a} vs {nc_b})"
         assert np.array_equal(lab_a, lab_b), f"Frame {i}: labels differ"
         assert (adj_a != adj_b).nnz == 0, f"Frame {i}: adjacency matrices differ"
+    print("  All frames identical.")
+
+    # --- Numba backend (with JIT warmup) ---
+    print("\nNumba backend (warming up JIT)...")
+    # Warmup on first frame.
+    s0 = structures[0]
+    find_bonds(
+        species, s0.cart_coords, bond_specs, s0.lattice.matrix,
+        backend="numba",
+    )
+    print("  JIT compiled.")
+
+    species_masks = _build_species_masks(species, bond_specs)
+
+    print("\nNumba backend (with pre-computed species masks):")
+    t0 = time.perf_counter()
+    results_numba: list[tuple] = []
+    for structure in structures:
+        coords = structure.cart_coords
+        lattice = structure.lattice.matrix
+        adj = find_bonds(
+            species, coords, bond_specs, lattice,
+            backend="numba", species_masks=species_masks,
+        )
+        n_clusters, labels = find_clusters(adj)
+        results_numba.append((adj, n_clusters, labels))
+    t1 = time.perf_counter()
+    print(f"  {t1 - t0:.3f}s ({(t1 - t0) / n_frames * 1000:.1f} ms/frame)")
+
+    # --- Verify numba matches numpy ---
+    print("\nVerifying numba matches numpy...")
+    for i in range(n_frames):
+        adj_np, nc_np, lab_np = results_with[i]
+        adj_nb, nc_nb, lab_nb = results_numba[i]
+        assert nc_np == nc_nb, f"Frame {i}: n_clusters differ ({nc_np} vs {nc_nb})"
+        assert np.array_equal(lab_np, lab_nb), f"Frame {i}: labels differ"
+        assert (adj_np != adj_nb).nnz == 0, f"Frame {i}: adjacency matrices differ"
     print("  All frames identical.")
 
     # --- Show sample composition ---
