@@ -2,20 +2,18 @@
 
 import numpy as np
 import pytest
+from collections import Counter
 from scipy import sparse
 
 from clustering import (
     BondSpec,
-    FrameResult,
+    TrajectoryResult,
     _hill_formula,
-    build_pair_masks,
+    analyse_trajectory,
     cluster_composition,
     find_bonds,
-    find_bonds_batch,
     find_clusters,
-    find_clusters_batch,
 )
-from collections import Counter
 
 numba = pytest.importorskip("numba")
 
@@ -150,17 +148,6 @@ class TestFindBondsSimple:
         assert adj.shape == (1, 1)
         assert adj.nnz == 0
 
-    def test_precomputed_pair_masks(self):
-        """Pre-computed pair masks give the same result as computing inline."""
-        species = ["C", "O"]
-        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        lattice = _cubic_lattice(20.0)
-
-        masks = build_pair_masks(species, specs)
-        adj = find_bonds(species, coords, specs, lattice, pair_masks=masks)
-        assert adj[0, 1]
-
 
 # ---------------------------------------------------------------------------
 # find_bonds — periodic boundary conditions
@@ -173,7 +160,7 @@ class TestFindBondsPBC:
     def test_bonded_across_boundary(self):
         """Two atoms near opposite faces of a 10 A cubic cell."""
         species = ["C", "O"]
-        # Atom 0 at x=0.5, atom 1 at x=9.5 → MIC distance = 1.0 A.
+        # Atom 0 at x=0.5, atom 1 at x=9.5 -> MIC distance = 1.0 A.
         coords = np.array([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]])
         specs = [BondSpec(species=("C", "O"), max_length=1.5)]
         lattice = _cubic_lattice(10.0)
@@ -196,7 +183,7 @@ class TestFindBondsPBC:
         """Bond spec longer than inscribed sphere radius raises."""
         species = ["C", "O"]
         coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        # Cell is 4 A cubic → inscribed radius = 2.0 A.
+        # Cell is 4 A cubic -> inscribed radius = 2.0 A.
         specs = [BondSpec(species=("C", "O"), max_length=2.5)]
         lattice = _cubic_lattice(4.0)
 
@@ -227,7 +214,7 @@ class TestFindClusters:
         assert labels[0] != labels[3]
 
     def test_all_isolated(self):
-        """No bonds → each atom is its own cluster."""
+        """No bonds -> each atom is its own cluster."""
         adj = sparse.csr_matrix((4, 4), dtype=bool)
 
         n_clusters, labels = find_clusters(adj)
@@ -283,7 +270,7 @@ class TestHillFormula:
         assert _hill_formula(Counter({"Fe": 1})) == "Fe"
 
     def test_no_carbon(self):
-        """Without carbon, H is not given priority — all alphabetical."""
+        """Without carbon, H is not given priority -- all alphabetical."""
         assert _hill_formula(Counter({"H": 2, "O": 1})) == "H2O"
 
     def test_complex_formula(self):
@@ -300,184 +287,44 @@ class TestClusterComposition:
         labels = np.array([0, 0, 0, 1, 1, 1])
 
         result = cluster_composition(species, labels)
-        assert result == {"CO2": 2}
+        assert result == Counter({"CO2": 2})
 
     def test_mixed_clusters(self):
         species = ["C", "O", "O", "H", "H", "O"]
         labels = np.array([0, 0, 0, 1, 1, 1])
 
         result = cluster_composition(species, labels)
-        assert result == {"CO2": 1, "H2O": 1}
+        assert result == Counter({"CO2": 1, "H2O": 1})
 
     def test_isolated_atoms(self):
         species = ["C", "O", "Fe"]
         labels = np.array([0, 1, 2])
 
         result = cluster_composition(species, labels)
-        assert result == {"C": 1, "O": 1, "Fe": 1}
+        assert result == Counter({"C": 1, "O": 1, "Fe": 1})
 
     def test_empty(self):
         result = cluster_composition([], np.array([], dtype=int))
-        assert result == {}
+        assert result == Counter()
+
+    def test_returns_counter(self):
+        """Return type is Counter, supporting arithmetic and most_common."""
+        species = ["C", "O", "O"]
+        labels = np.array([0, 0, 0])
+        result = cluster_composition(species, labels)
+        assert isinstance(result, Counter)
 
 
 # ---------------------------------------------------------------------------
-# FrameResult.composition
+# analyse_trajectory
 # ---------------------------------------------------------------------------
 
 
-class TestFrameResultComposition:
-    """Test the composition property on FrameResult."""
+class TestAnalyseTrajectory:
+    """Test trajectory analysis with auto-selected backend."""
 
-    def test_composition_property(self):
-        """composition returns the same result as cluster_composition."""
-        species = ["C", "O", "O", "H", "H", "O"]
-        labels = np.array([0, 0, 0, 1, 1, 1])
-        adj = sparse.csr_matrix((6, 6), dtype=bool)
-
-        result = FrameResult(
-            species=species, adjacency=adj, n_clusters=2, labels=labels,
-        )
-        assert result.composition == {"CO2": 1, "H2O": 1}
-
-
-# ---------------------------------------------------------------------------
-# Numba backend
-# ---------------------------------------------------------------------------
-
-
-class TestFindBondsNumba:
-    """Verify the numba backend matches numpy for all bond detection cases."""
-
-    def test_two_bonded_atoms(self):
-        species = ["C", "O"]
-        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        lattice = _cubic_lattice(20.0)
-
-        adj = find_bonds(species, coords, specs, lattice, backend="numba")
-        assert adj[0, 1]
-        assert adj[1, 0]
-        assert not adj[0, 0]
-
-    def test_two_atoms_too_far(self):
-        species = ["C", "O"]
-        coords = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        lattice = _cubic_lattice(20.0)
-
-        adj = find_bonds(species, coords, specs, lattice, backend="numba")
-        assert adj.nnz == 0
-
-    def test_species_mismatch(self):
-        species = ["C", "C"]
-        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        lattice = _cubic_lattice(20.0)
-
-        adj = find_bonds(species, coords, specs, lattice, backend="numba")
-        assert adj.nnz == 0
-
-    def test_wildcard_species(self):
-        species = ["Zr", "O"]
-        coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        specs = [BondSpec(species=("*", "*"), max_length=1.5)]
-        lattice = _cubic_lattice(20.0)
-
-        adj = find_bonds(species, coords, specs, lattice, backend="numba")
-        assert adj[0, 1]
-
-    def test_bonded_across_boundary(self):
-        species = ["C", "O"]
-        coords = np.array([[0.5, 5.0, 5.0], [9.5, 5.0, 5.0]])
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        lattice = _cubic_lattice(10.0)
-
-        adj = find_bonds(species, coords, specs, lattice, backend="numba")
-        assert adj[0, 1]
-
-    def test_matches_numpy_on_larger_system(self):
-        """Random 20-atom system: numba and numpy give identical results."""
-        rng = np.random.default_rng(42)
-        n = 20
-        species = rng.choice(["C", "O", "H", "N"], size=n).tolist()
-        coords = rng.uniform(0, 8, size=(n, 3))
-        lattice = _cubic_lattice(10.0)
-        specs = [
-            BondSpec(species=("C", "O"), max_length=1.6),
-            BondSpec(species=("O", "H"), max_length=1.2),
-            BondSpec(species=("*", "*"), max_length=1.8),
-        ]
-
-        adj_np = find_bonds(species, coords, specs, lattice, backend="numpy")
-        adj_nb = find_bonds(species, coords, specs, lattice, backend="numba")
-
-        assert (adj_np != adj_nb).nnz == 0
-
-
-# ---------------------------------------------------------------------------
-# Batch (parallel) bond detection
-# ---------------------------------------------------------------------------
-
-
-class TestFindBondsBatch:
-    """Verify batch processing matches sequential frame-by-frame results."""
-
-    def test_batch_matches_sequential(self):
-        """Multiple frames with varying coords give identical results."""
-        rng = np.random.default_rng(99)
-        n = 30
-        n_frames = 5
-        species = rng.choice(["C", "O", "H"], size=n).tolist()
-        lattice = _cubic_lattice(10.0)
-        specs = [
-            BondSpec(species=("C", "O"), max_length=1.6),
-            BondSpec(species=("O", "H"), max_length=1.2),
-            BondSpec(species=("*", "*"), max_length=1.8),
-        ]
-
-        all_coords = rng.uniform(0, 8, size=(n_frames, n, 3))
-        all_lattices = np.broadcast_to(lattice, (n_frames, 3, 3)).copy()
-
-        # Sequential reference.
-        sequential = [
-            find_bonds(species, all_coords[f], specs, all_lattices[f],
-                       backend="numba")
-            for f in range(n_frames)
-        ]
-
-        # Batch.
-        batch = find_bonds_batch(species, all_coords, specs, all_lattices)
-
-        for f in range(n_frames):
-            assert (sequential[f] != batch[f]).nnz == 0
-
-    def test_variable_lattice(self):
-        """Different lattice per frame (NPT-like)."""
-        species = ["C", "O"]
-        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
-        coords_f0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        coords_f1 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-
-        all_coords = np.stack([coords_f0, coords_f1])
-        all_lattices = np.stack([_cubic_lattice(20.0), _cubic_lattice(15.0)])
-
-        batch = find_bonds_batch(species, all_coords, specs, all_lattices)
-
-        assert batch[0][0, 1]
-        assert batch[1][0, 1]
-
-
-# ---------------------------------------------------------------------------
-# Batch (parallel) bond detection + clustering
-# ---------------------------------------------------------------------------
-
-
-class TestFindClustersBatch:
-    """Verify combined bond+cluster batch matches sequential results."""
-
-    def test_matches_sequential(self):
-        """Labels from batch union-find match find_bonds + find_clusters."""
+    def test_matches_sequential_find_bonds(self):
+        """Batch results match frame-by-frame find_bonds + find_clusters."""
         rng = np.random.default_rng(99)
         n = 30
         n_frames = 5
@@ -496,38 +343,37 @@ class TestFindClustersBatch:
         ref_labels = []
         ref_n_clusters = []
         for f in range(n_frames):
-            adj = find_bonds(species, all_coords[f], specs, all_lattices[f],
-                             backend="numba")
+            adj = find_bonds(species, all_coords[f], specs, all_lattices[f])
             nc, lab = find_clusters(adj)
             ref_labels.append(lab)
             ref_n_clusters.append(nc)
 
-        # Batch.
-        batch_n_clusters, batch_labels = find_clusters_batch(
+        # analyse_trajectory.
+        result = analyse_trajectory(
             species, all_coords, specs, all_lattices,
         )
 
+        assert isinstance(result, TrajectoryResult)
         for f in range(n_frames):
-            assert batch_n_clusters[f] == ref_n_clusters[f], (
+            assert result.n_clusters[f] == ref_n_clusters[f], (
                 f"Frame {f}: n_clusters differ "
-                f"({batch_n_clusters[f]} vs {ref_n_clusters[f]})"
+                f"({result.n_clusters[f]} vs {ref_n_clusters[f]})"
             )
-            assert np.array_equal(batch_labels[f], ref_labels[f]), (
+            assert np.array_equal(result.labels[f], ref_labels[f]), (
                 f"Frame {f}: labels differ"
             )
 
     def test_all_isolated(self):
-        """No bonds at all — each atom is its own cluster."""
+        """No bonds at all -- each atom is its own cluster."""
         species = ["C", "O", "H"]
-        # Atoms far apart in a big cell.
         coords = np.array([[[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [9.0, 9.0, 9.0]]])
         lattice = np.array([_cubic_lattice(20.0)])
         specs = [BondSpec(species=("C", "O"), max_length=1.5)]
 
-        n_clusters, labels = find_clusters_batch(species, coords, specs, lattice)
+        result = analyse_trajectory(species, coords, specs, lattice)
 
-        assert n_clusters[0] == 3
-        assert len(set(labels[0])) == 3
+        assert result.n_clusters[0] == 3
+        assert len(set(result.labels[0])) == 3
 
     def test_single_cluster(self):
         """All atoms bonded into one cluster."""
@@ -536,7 +382,49 @@ class TestFindClustersBatch:
         lattice = np.array([_cubic_lattice(20.0)])
         specs = [BondSpec(species=("C", "O"), max_length=1.5)]
 
-        n_clusters, labels = find_clusters_batch(species, coords, specs, lattice)
+        result = analyse_trajectory(species, coords, specs, lattice)
 
-        assert n_clusters[0] == 1
-        assert labels[0, 0] == labels[0, 1] == 0
+        assert result.n_clusters[0] == 1
+        assert result.labels[0, 0] == result.labels[0, 1] == 0
+
+    def test_variable_lattice(self):
+        """Different lattice per frame (NPT-like)."""
+        species = ["C", "O"]
+        specs = [BondSpec(species=("C", "O"), max_length=1.5)]
+        coords_f0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        coords_f1 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+        all_coords = np.stack([coords_f0, coords_f1])
+        all_lattices = np.stack([_cubic_lattice(20.0), _cubic_lattice(15.0)])
+
+        result = analyse_trajectory(species, all_coords, specs, all_lattices)
+
+        assert result.n_clusters[0] == 1
+        assert result.n_clusters[1] == 1
+
+
+# ---------------------------------------------------------------------------
+# TrajectoryResult
+# ---------------------------------------------------------------------------
+
+
+class TestTrajectoryResult:
+    """Test TrajectoryResult dataclass."""
+
+    def test_composition(self):
+        """composition(frame) returns formula counts for that frame."""
+        species = ["C", "O", "O", "H", "H", "O"]
+        labels = np.array([[0, 0, 0, 1, 1, 1]])
+        n_clusters = np.array([2])
+
+        result = TrajectoryResult(species, n_clusters, labels)
+        assert result.composition(0) == Counter({"CO2": 1, "H2O": 1})
+
+    def test_composition_returns_counter(self):
+        """composition() returns a Counter."""
+        species = ["C", "O", "O"]
+        labels = np.array([[0, 0, 0]])
+        n_clusters = np.array([1])
+
+        result = TrajectoryResult(species, n_clusters, labels)
+        assert isinstance(result.composition(0), Counter)
