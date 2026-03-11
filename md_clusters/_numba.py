@@ -7,6 +7,7 @@ This module is an internal implementation detail.  Use
 from __future__ import annotations
 
 from fnmatch import fnmatch
+from typing import Any
 
 import numpy as np
 
@@ -14,7 +15,7 @@ from md_clusters.bonds import _inscribed_sphere_radius
 from md_clusters.types import BondSpec
 
 try:
-    import numba
+    import numba  # type: ignore[import-untyped]
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -46,7 +47,7 @@ def _build_species_masks(
     return match_a, match_b
 
 
-def _make_numba_cluster_batch_kernel():
+def _make_numba_cluster_batch_kernel() -> Any:
     """Build a parallel kernel that finds bonds and clusters in one pass.
 
     Uses union-find (disjoint set) per frame so that clustering is done
@@ -55,7 +56,7 @@ def _make_numba_cluster_batch_kernel():
     """
 
     @numba.njit(parallel=True)
-    def _find_clusters_batch_kernel(
+    def _find_clusters_batch_kernel(  # type: ignore[no-untyped-def]
         all_coords,    # (n_frames, n, 3) float64
         all_lattices,  # (n_frames, 3, 3) float64
         all_lat_invs,  # (n_frames, 3, 3) float64
@@ -153,7 +154,7 @@ def _make_numba_cluster_batch_kernel():
 _numba_cluster_batch_kernel = None
 
 
-def _get_numba_cluster_batch_kernel():
+def _get_numba_cluster_batch_kernel() -> Any:
     global _numba_cluster_batch_kernel
     if _numba_cluster_batch_kernel is None:
         _numba_cluster_batch_kernel = _make_numba_cluster_batch_kernel()

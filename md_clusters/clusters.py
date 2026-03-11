@@ -34,6 +34,6 @@ def find_clusters(adjacency: sparse.csr_matrix) -> tuple[int, np.ndarray]:
     rank = np.argsort(first_occurrence)
     inverse = np.empty_like(rank)
     inverse[rank] = np.arange(n_clusters)
-    labels = inverse[labels]
+    labels_out: np.ndarray = inverse[labels]
 
-    return int(n_clusters), labels
+    return int(n_clusters), labels_out

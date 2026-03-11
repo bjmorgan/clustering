@@ -39,10 +39,11 @@ def _species_pair_mask(
     match_b = {s for s in unique_species if fnmatch(s, sp_b)}
     mask_a = np.array([s in match_a for s in species])
     mask_b = np.array([s in match_b for s in species])
-    return (
+    result: np.ndarray = (
         (mask_a[:, np.newaxis] & mask_b[np.newaxis, :])
         | (mask_b[:, np.newaxis] & mask_a[np.newaxis, :])
     )
+    return result
 
 
 def _build_pair_masks(

@@ -18,8 +18,13 @@ ase = ["ase"]
 pymatgen = ["pymatgen"]
 dev = [
     "pytest",
+    "mypy",
     "numba",
 ]
 
 [tool.setuptools.packages.find]
 include = ["md_clusters*"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
