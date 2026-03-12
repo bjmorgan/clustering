@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -96,7 +97,7 @@ def analyse_trajectory(
 
 
 def analyse_structures(
-    structures: list,
+    structures: list[Any],
     bond_specs: list[BondSpec],
 ) -> TrajectoryResult:
     """Analyse a trajectory of pymatgen Structure objects.
@@ -123,7 +124,7 @@ def analyse_structures(
 
 
 def analyse_atoms(
-    atoms,
+    atoms: Any,
     bond_specs: list[BondSpec],
 ) -> TrajectoryResult:
     """Analyse a trajectory of ASE Atoms objects.
